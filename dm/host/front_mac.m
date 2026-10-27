@@ -15,6 +15,7 @@
 #include "pad_slots.h"
 #include "haptics_apple.h"
 #include "motion_apple.h"
+#include "motion_pro_mac.h"
 #include <signal.h>
 #include <math.h>
 #include <unistd.h>
@@ -338,6 +339,21 @@ static void sync_pad_players(void) {
     dm_pad_players(mask);
 }
 
+static void pro_players_changed(GCController *gone) {
+    int count = 0, player = -1;
+    for (GCController *c in GCController.controllers) if (c != gone && c.extendedGamepad && [c.productCategory isEqualToString:@"Switch Pro Controller"]) {
+        count++;
+        for (int p = 0; p < DM_PLAYERS; p++) {
+            if (g_players[p].type == PLAYER_DEV_CONTROLLER && g_players[p].controller == c) {
+                player = p;
+                break;
+            }
+        }
+    }
+    dm_motion_pro_players(count, player);
+}
+static void pro_devices_changed(void) { pro_players_changed(nil); }
+
 static void pads_changed(GCController *gone) {
     NSArray<GCController *> *now = GCController.controllers;
     char nb[16];
@@ -432,6 +448,7 @@ static void pads_changed(GCController *gone) {
 
     sync_pad_players();
     update_controller_menu();
+    pro_players_changed(gone);
 }
 
 // Focus: a window that is no longer key sees no key-up, mouse-up or controller release, so whatever is held when it loses focus (another app, the text box, minimized) would
@@ -440,6 +457,7 @@ static void pads_changed(GCController *gone) {
 static int g_mouse_down;   // the mouse holds the touch (DmGameView)
 static void input_release(void) {
     g_input_on = 0;
+    dm_motion_pro_active(0);
     g_btn = 0;
     g_lx_pos = g_lx_neg = g_ly_pos = g_ly_neg = 0;
     g_rx_pos = g_rx_neg = g_ry_pos = g_ry_neg = 0;
@@ -453,6 +471,7 @@ static void input_release(void) {
 }
 static void input_resume(void) {
     g_input_on = 1;
+    dm_motion_pro_active(1);
     for (int p = 0; p < DM_PLAYERS; p++) {
         if (g_players[p].type == PLAYER_DEV_CONTROLLER && g_players[p].controller.extendedGamepad) {
             pad_read(g_players[p].controller.extendedGamepad);
@@ -471,6 +490,7 @@ static void pads_start(void) {
     if (dz > 0.01f) g_pad_deadzone = dz;
 
     pads_changed(nil);
+    dm_motion_pro_start(pro_devices_changed);
 }
 
 @interface DmGameView : NSView @end
