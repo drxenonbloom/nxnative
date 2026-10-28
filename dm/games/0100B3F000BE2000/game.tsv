@@ -1,0 +1,43 @@
+# POKKÉN TOURNAMENT DX (Switch, base game v0 = 1.0.0 + update v458752 = 1.3.3)
+# Bandai Namco Studios, SDK 4.4.1 (v0: SDK 1.6.0), NVN; modules main + subsdk0 (GLSLC) + subsdk1 (NintendoSDK_movie) + sdk.
+# RomFS assets are in Bandai Namco .drp archives (mode 4 in 1.3.3, mode 5 in 1.0.0's shader archives); shaders are NSNX containers of GLSLC outputs inside NX/shader/shader.drp,
+# NX/shader/effect.drp, NX/font/font.drp, NX/shader/ferrum_tani_test.nsh and main.
+
+# ---- Identity ----
+title_id	0100B3F000BE2000
+program_id	0100B3F000BE2000
+
+# ---- App ----
+name	POKKÉN TOURNAMENT DX
+ipa	PokkenTournamentDX.ipa
+app_category	public.app-category.action-games
+pad_layout	full
+
+# ---- Versions ----
+build	v0	1.0.0	main=62c368a77211d296ea4f8d9aa2329008	subsdk0=1686ae4b62a9c6a3b6ee7a9187ee4932	subsdk1=b43e2fdcf4b3fad2eb10e3680981223f	sdk=972cc2555ec0d6a03473f8c0b03e2413
+build	v458752	1.3.3	main=49690ba2efdcd7a76a506749e1b4494c	subsdk0=d6fb65924348116bb5525ddd09f51aa9	subsdk1=a4604a0a8b8af7ae0eac1add42a8b978	sdk=af7348498c7759b0f3f0396a8a36014c
+package	v458752
+shader_versions	v0 v458752
+
+# ---- Files ----
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	NX/movie/master/opening02.webm
+zip_store	.drp:.nus3bank:.webm:.mp4:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool - 64 MB: a 3328 MB heap region; the NPDM declares 0 MB of system resource (IsVirtualAddressMemoryEnabled is false)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xcd500000
+sys_resource	0x0
+
+# ---- Graphics ----
+# Textures unpacked from .drp archives into CPU-mapped pools
+tex_flush_upload	on
+tex_dirty_upload	on
+
+# ---- Shader split ----
+shader_groups	/NX/shader/effect.drp=effect /NX/shader/=shader /NX/font/=font
+shader_note	POKKÉN TOURNAMENT DX shaders
+

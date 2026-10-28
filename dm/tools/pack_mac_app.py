@@ -146,6 +146,14 @@ def build_app_bundle(game_id, work_dir, host_bin, patched_dir, romfs_dir, msl_di
             dest_shmap.symlink_to(shmap_path)
         else:
             shutil.copy2(shmap_path, dest_shmap)
+        for extra_tsv in ('c1_full.tsv', 'cb_extent.tsv', 'pso_manifest.tsv'):
+            src_tsv = Path(shmap_path).parent / extra_tsv
+            if src_tsv.is_file():
+                dest_tsv = dm_res_dir / extra_tsv
+                if mode == 'thin':
+                    dest_tsv.symlink_to(src_tsv)
+                else:
+                    shutil.copy2(src_tsv, dest_tsv)
 
     dest_font = dm_res_dir / 'font'
     if font_dir and Path(font_dir).is_dir():
@@ -188,24 +196,30 @@ def build_app_bundle(game_id, work_dir, host_bin, patched_dir, romfs_dir, msl_di
         else:
             shutil.copytree(aoc_dir, dest_aoc)
 
-    # Ad-hoc codesign with developer entitlements
+    # Ad-hoc codesign standalone executable before placing inside .app (avoids sealing gigabytes of Resources)
     tmp_ent = Path(tempfile.gettempdir()) / f"nxnative_ent_{os.getpid()}.plist"
+    tmp_bin = Path(tempfile.gettempdir()) / f"nxnative_bin_{os.getpid()}"
     try:
+        shutil.copy2(host_bin, tmp_bin)
+        tmp_bin.chmod(0o755)
         with tmp_ent.open('wb') as ef:
             plistlib.dump({'com.apple.security.get-task-allow': True}, ef)
-        subprocess.run(['codesign', '-s', '-', '--force', '--deep', '--entitlements', str(tmp_ent), str(out_app)],
+        subprocess.run(['codesign', '-s', '-', '--force', '--entitlements', str(tmp_ent), str(tmp_bin)],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        shutil.copy2(tmp_bin, dest_bin)
     except Exception:
         try:
-            subprocess.run(['codesign', '-s', '-', '--force', '--deep', str(out_app)],
+            subprocess.run(['codesign', '-s', '-', '--force', str(tmp_bin)],
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            shutil.copy2(tmp_bin, dest_bin)
         except subprocess.CalledProcessError as e:
             print(f"Warning: codesign failed: {e}", file=sys.stderr)
     finally:
-        try:
-            tmp_ent.unlink(missing_ok=True)
-        except Exception:
-            pass
+        for p in (tmp_ent, tmp_bin):
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     print(f"Packed macOS application: {out_app} (mode: {mode})")
     return out_app

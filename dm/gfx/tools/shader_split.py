@@ -980,6 +980,157 @@ def bdt_shaders(path, rel, ents, out):
             for nm, b in bnd3_members(d, label):
                 if b[:4] == b'\x91\x68\x86\x19': out.extend(glslc_shaders(b, f'{label}/{nm}'))
 
+# Bandai Namco's DRP archive (Pokkén Tournament DX: 15,269 '.drp' files under NX/, holding NSNX shader packages in NX/shader/shader.drp, NX/shader/effect.drp and NX/font/font.drp):
+# +0x1c u32be seed w8, mode = (w8 >> 14) & 0xf (4 in update 1.3.3, 5 in base 1.0.0's shader archives; main+0x89e710). Mode 4 XORs every u32le word with an Xorshift128 stream seeded from w8
+# (main+0x784dec, +0x784e14); mode 5 XORs the first 0x80 bytes with that stream and the rest with an Xoroshiro128+ stream seeded via SplitMix64 from decrypted +0x60 / +0x68, and its deflated
+# sub-blocks subtract a 256-byte table (main+0xb73214) from each literal byte during inflate (main+0x89080c). Only shader entries (flags 0x10000002 or 0x10000018 at +0x40 of the entry header)
+# are unpacked, and the first 0xe0 bytes decide whether a file starts with one
+DRP_TAB = bytes.fromhex(
+    '0014072e3b2b38090c1d353e0d332512232a0e28360437292f252d183a1e1b2c'
+    '21022a3620311d1009131e3b340b2c053c30173b201d19251c3b1a3d2e222a3f'
+    '3d1f31230c2b132419252c0f2225113438343f1e172f360c14143a302c360725'
+    '152d371c30230b3e1906203704242a2b043e2d0b0e3f0a3c0b193c2f341c3a26'
+    '1a3931081c3c1a05033813313433111b142e332e1b0f162a1e312e0218101b0d'
+    '1d0c0206170d0c1b18033d1219160927053a0c16272c022436221b272f1a1314'
+    '3f06082a2f3221150f301e262d18230801392d143730050b221838052b331e37'
+    '371f0f241628152b2b1b3f381a24351c181f3803101512273d2e0b2104380d11')
+DRP_LEN_BASE = (3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258)
+DRP_LEN_EXTRA = (0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0)
+DRP_DIST_BASE = (1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577)
+DRP_DIST_EXTRA = (0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13)
+DRP_CL_ORDER = (16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15)
+
+def _drp_inflate5(src, unc_sz):
+    """Mode 5 custom inflate (main+0x89080c): standard zlib/DEFLATE framing, with DRP_TAB[c_idx] subtracted from each literal byte (c_idx starts at unc_sz % 255)"""
+    pos, bitbuf, bitcnt, c_idx, out = 2, 0, 0, unc_sz % 255, bytearray()
+    def bits(n):
+        nonlocal pos, bitbuf, bitcnt
+        while bitcnt < n:
+            bitbuf |= src[pos] << bitcnt; pos += 1; bitcnt += 8
+        v = bitbuf & ((1 << n) - 1); bitbuf >>= n; bitcnt -= n
+        return v
+    def huff_build(lengths):
+        cnt = collections.Counter(l for l in lengths if l)
+        if not cnt: return {}
+        code, nxt, tbl = 0, {}, {}
+        for b in range(1, 16):
+            code = (code + cnt.get(b - 1, 0)) << 1; nxt[b] = code
+        for sym, l in enumerate(lengths):
+            if l:
+                c, r = nxt[l], 0; nxt[l] += 1
+                for _ in range(l): r = (r << 1) | (c & 1); c >>= 1
+                tbl[(l, r)] = sym
+        return tbl
+    def decode(tbl):
+        nonlocal pos, bitbuf, bitcnt
+        code = 0
+        for l in range(1, 16):
+            if bitcnt < 1: bitbuf |= src[pos] << bitcnt; pos += 1; bitcnt += 8
+            code |= (bitbuf & 1) << (l - 1); bitbuf >>= 1; bitcnt -= 1
+            s = tbl.get((l, code))
+            if s is not None: return s
+        red('DRP mode 5: invalid Huffman code')
+    fixed_lit = huff_build([8] * 144 + [9] * 112 + [7] * 24 + [8] * 8)
+    fixed_dist = huff_build([5] * 32)
+    while True:
+        bfinal, btype = bits(1), bits(2)
+        if btype == 0:
+            bitbuf = bitcnt = 0
+            ln = src[pos] | (src[pos + 1] << 8); pos += 4
+            for b in src[pos:pos + ln]:
+                out.append((b - DRP_TAB[c_idx]) & 0xff); c_idx = (c_idx + 1) & 0xff
+            pos += ln
+        elif btype in (1, 2):
+            if btype == 1: lt, dt = fixed_lit, fixed_dist
+            else:
+                hlit, hdist, hclen = bits(5) + 257, bits(5) + 1, bits(4) + 4
+                cl = [0] * 19
+                for i in range(hclen): cl[DRP_CL_ORDER[i]] = bits(3)
+                ct = huff_build(cl); lens = []
+                while len(lens) < hlit + hdist:
+                    s = decode(ct)
+                    if s < 16: lens.append(s)
+                    elif s == 16: lens.extend([lens[-1]] * (bits(2) + 3))
+                    elif s == 17: lens.extend([0] * (bits(3) + 3))
+                    else: lens.extend([0] * (bits(7) + 11))
+                lt, dt = huff_build(lens[:hlit]), huff_build(lens[hlit:])
+            while True:
+                s = decode(lt)
+                if s == 256: break
+                if s < 256:
+                    out.append((s - DRP_TAB[c_idx]) & 0xff); c_idx = (c_idx + 1) & 0xff
+                else:
+                    s -= 257; ln = DRP_LEN_BASE[s] + bits(DRP_LEN_EXTRA[s])
+                    d = decode(dt); dist = DRP_DIST_BASE[d] + bits(DRP_DIST_EXTRA[d])
+                    for _ in range(ln): out.append(out[-dist])
+        else: red(f'DRP mode 5: invalid block type {btype}')
+        if bfinal: break
+    return bytes(out)
+
+def drp_shaders(path, label, out):
+    """NSNX shader containers inside a Bandai Namco .drp file (Pokkén Tournament DX): each shader entry (flags 0x10000002 or 0x10000018) inflates to an 'NSNX' blob of GLSLC outputs"""
+    import zlib
+    with open(path, 'rb') as f: head = f.read(0xe0)
+    if len(head) < 0xe0: return
+    w8 = struct.unpack_from('>I', head, 0x1c)[0]; mode = (w8 >> 14) & 0xf
+    if mode not in (4, 5): return
+    bswap = lambda v: ((v & 0xff) << 24) | ((v & 0xff00) << 8) | ((v >> 8) & 0xff00) | ((v >> 24) & 0xff)
+    asr = lambda v, sh: ((v - 0x100000000) >> sh) & 0xffffffff if v & 0x80000000 else v >> sh
+    ror64 = lambda v, sh: ((v >> sh) | ((v << (64 - sh)) & 0xffffffffffffffff)) & 0xffffffffffffffff
+    def decrypt_prefix(raw):
+        buf = bytearray(raw); s = w8; st = []
+        for _ in range(4): s = (s * 0x41c64e6d + 0x3039) & 0xffffffff; st.append(s)
+        w24 = 0; n4 = (0x80 if mode == 5 else len(buf)) >> 2
+        for i in range(n4):
+            w10, w11, s2, w9 = st
+            w9 = (w9 ^ ((w9 << 11) & 0xffffffff)) & 0xffffffff
+            w12 = (w10 ^ asr(w10, 19) ^ w9) & 0xffffffff
+            w9 = (w12 ^ asr(w9, 8)) & 0xffffffff
+            st = [w9, w10, w11, s2]; r = bswap(w9 & 0x7fffffff)
+            struct.pack_into('<I', buf, i * 4, struct.unpack_from('<I', buf, i * 4)[0] ^ w24 ^ r)
+            w24 = (r >> 3) & 0x80
+        struct.pack_into('>I', buf, 0x1c, w8)
+        if mode == 5:
+            w11, w12 = struct.unpack_from('>I', buf, 0x60)[0], struct.unpack_from('>i', buf, 0x68)[0]
+            x11 = ((w12 & 0xffffffffffffffff) | ((w11 & 0xffffffff) << 32)) & 0xffffffffffffffff
+            x12, x11 = (x11 + 0x9e3779b97f4a7c15) & 0xffffffffffffffff, (x11 + 0x3c6ef372fe94f82a) & 0xffffffffffffffff
+            x12 ^= x12 >> 30; x11 ^= x11 >> 30
+            x12 = (x12 * 0xbf58476d1ce4e5b9) & 0xffffffffffffffff; x11 = (x11 * 0xbf58476d1ce4e5b9) & 0xffffffffffffffff
+            x12 ^= x12 >> 27; x11 ^= x11 >> 27
+            x12 = (x12 * 0x94d049bb133111eb) & 0xffffffffffffffff; x11 = (x11 * 0x94d049bb133111eb) & 0xffffffffffffffff
+            x11 ^= x11 >> 31; x12 ^= x12 >> 31; w10 = x8 = 0
+            for i in range(0x20, len(buf) >> 2):
+                if not w10:
+                    x15 = x11 ^ x12; x17 = ror64(x15, 0x1c); x18 = x15 ^ ror64(x12, 9)
+                    x15 = (x18 ^ ((x15 << 14) & 0xffffffffffffffff)) & 0xffffffffffffffff
+                    x8 = (x11 + x12) & 0xffffffffffffffff; x12, x11 = x15, x17
+                w15 = (x8 & 0xffffffff) if w10 else (x8 >> 32)
+                struct.pack_into('<I', buf, i * 4, struct.unpack_from('<I', buf, i * 4)[0] ^ bswap(w15))
+                w10 ^= 1
+        return buf
+    h = decrypt_prefix(head)
+    ver, count = struct.unpack_from('>hh', h, 0x14); pos = 0x80 if ver > 4 else 0x60
+    if count <= 0 or struct.unpack_from('>I', h, pos + 0x40)[0] not in (0x10000002, 0x10000018): return
+    with open(path, 'rb') as f:
+        need = pos + struct.unpack_from('>i', h, pos + 0x44)[0]
+        buf = decrypt_prefix(f.read(max(need, 0x40000)))
+        for _ in range(count):
+            if pos + 0x60 > len(buf):
+                buf = decrypt_prefix((f.seek(0), f.read())[1])
+            flags, stride = struct.unpack_from('>Ii', buf, pos + 0x40)
+            if flags not in (0x10000002, 0x10000018): break
+            if pos + stride > len(buf):
+                buf = decrypt_prefix((f.seek(0), f.read(pos + stride + 0x1000))[1])
+            name = buf[pos:pos + 0x40].split(b'\0', 1)[0].decode('ascii', 'replace')
+            cmask = buf[pos + 0x49] & 0xf; offs = struct.unpack_from('>5i', buf, pos + 0x4c); base = pos + 0x60
+            for k in range(4):
+                if offs[k + 1] <= offs[k]: continue
+                sub = bytes(buf[base + offs[k]:base + offs[k + 1]])
+                if (cmask >> k) & 1:
+                    unc_sz = struct.unpack_from('>I', sub, 0)[0]
+                    sub = zlib.decompress(sub[4:]) if mode == 4 else _drp_inflate5(sub[4:], unc_sz)
+                if b'\x91\x68\x86\x19' in sub: out.extend(glslc_shaders(sub, f'{label}#{name}', need=False))
+
 class LzxError(Exception): pass
 
 # MonoGame's compressed XNB (Stardew Valley: 3,535 of its 3,549 .xnb files): ContentManager.cs knows
@@ -2065,6 +2216,10 @@ def scan_file(args):
 def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
+    if ext == '.drp':
+        found = []
+        drp_shaders(path, '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), {}
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     with open(path, 'rb') as f: head = f.read(16)
     found = []; trees = {}
