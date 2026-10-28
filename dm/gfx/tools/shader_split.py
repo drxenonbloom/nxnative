@@ -1130,6 +1130,8 @@ def drp_shaders(path, label, out):
                     unc_sz = struct.unpack_from('>I', sub, 0)[0]
                     sub = zlib.decompress(sub[4:]) if mode == 4 else _drp_inflate5(sub[4:], unc_sz)
                 if b'\x91\x68\x86\x19' in sub: out.extend(glslc_shaders(sub, f'{label}#{name}', need=False))
+            if stride <= 0: break
+            pos += stride
 
 class LzxError(Exception): pass
 
