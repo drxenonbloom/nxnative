@@ -173,23 +173,37 @@ static int img_path(const char *p, int *mi, int64_t *k) {
 static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     pthread_once(&g_txn_lock_once, txn_locks_init);
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
-    for (int i = 0; i < g_nmnt; i++)
-        if (!strcmp(g_mnt[i].name, name)) { pthread_mutex_unlock(&g_lock); return RES_OK; }
-    if (g_nmnt >= MAX_MOUNT) die("mount table full");
-    strlcpy(g_mnt[g_nmnt].name, name, sizeof g_mnt[0].name);
-    g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
-    g_mnt[g_nmnt].txn_root = -1;
-    atomic_store(&g_mnt[g_nmnt].poison, 0);
-    atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
+    int target_idx = -1;
+    for (int i = 0; i < g_nmnt; i++) {
+        if (!strcmp(g_mnt[i].name, name)) {
+            if (!strcmp(g_mnt[i].dir, dir)) { pthread_mutex_unlock(&g_lock); return RES_OK; }
+            target_idx = i;
+            if (g_mnt[i].img) {
+                romfs_image_close(g_mnt[i].img);
+                g_mnt[i].img = NULL;
+            }
+            break;
+        }
+        if (target_idx < 0 && !g_mnt[i].name[0]) target_idx = i;
+    }
+    if (target_idx < 0) {
+        if (g_nmnt >= MAX_MOUNT) die("mount table full");
+        target_idx = g_nmnt++;
+    }
+    strlcpy(g_mnt[target_idx].name, name, sizeof g_mnt[0].name);
+    g_mnt[target_idx].ro = ro; g_mnt[target_idx].overlay[0] = 0; g_mnt[target_idx].commit[0] = 0;
+    g_mnt[target_idx].txn_root = -1;
+    atomic_store(&g_mnt[target_idx].poison, 0);
+    atomic_store(&g_mnt[target_idx].first_write_ns, 0);
     if (!strcmp(name, "rom") && getenv("DM_ROMFS_OVERLAY"))
-        strlcpy(g_mnt[g_nmnt].overlay, getenv("DM_ROMFS_OVERLAY"), sizeof g_mnt[0].overlay);
+        strlcpy(g_mnt[target_idx].overlay, getenv("DM_ROMFS_OVERLAY"), sizeof g_mnt[0].overlay);
     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
     int txn_err = 0, k = 0;
-    while (txn && k < g_nmnt && strcmp(g_mnt[k].commit, dir)) k++;
+    while (txn && k < g_nmnt && (k == target_idx || strcmp(g_mnt[k].commit, dir))) k++;
     if (txn && k < g_nmnt) {   // a second name for a save already mounted (account and device save data are one host save): it shares that transaction, whose pending writes a new clone would drop
-        strlcpy(g_mnt[g_nmnt].commit, g_mnt[k].commit, sizeof g_mnt[0].commit); strlcpy(g_mnt[g_nmnt].dir, g_mnt[k].dir, sizeof g_mnt[0].dir);
-        g_mnt[g_nmnt].txn_root = g_mnt[k].txn_root;
+        strlcpy(g_mnt[target_idx].commit, g_mnt[k].commit, sizeof g_mnt[0].commit); strlcpy(g_mnt[target_idx].dir, g_mnt[k].dir, sizeof g_mnt[0].dir);
+        g_mnt[target_idx].txn_root = g_mnt[k].txn_root;
     } else if (txn) {
         char work[1100], neu[1100]; snprintf(work, sizeof work, "%s.work", dir); snprintf(neu, sizeof neu, "%s.new", dir);
         mkdir(dir, 0755);
@@ -197,25 +211,24 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
         if (!access(work, F_OK) && rm_tree(work)) why = "cannot clear the work directory left over from last time";
         else if (!access(neu, F_OK) && rm_tree(neu)) why = "cannot clear the .new left over from last time";
         else if (dm_fs_test_fail("mountclone") || clonefile(dir, work, 0)) why = "cloning the work directory failed";
-        if (why) { txn_err = errno ? errno : EIO; g_mnt[g_nmnt].ro = 1; strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
+        if (why) { txn_err = errno ? errno : EIO; g_mnt[target_idx].ro = 1; strlcpy(g_mnt[target_idx].dir, dir, sizeof g_mnt[0].dir);
             LOG("[RED] save transaction: %s (%s, errno=%d) -- mounting the committed directory %s read-only instead: saves cannot be written this session, the committed version is unchanged", why, work, txn_err, dir); }
         else {
-            strlcpy(g_mnt[g_nmnt].commit, dir, sizeof g_mnt[0].commit);
-            g_mnt[g_nmnt].txn_root = g_nmnt;
-            atomic_store(&g_mnt[g_nmnt].poison, 0);
-            atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
-            strlcpy(g_mnt[g_nmnt].dir, work, sizeof g_mnt[0].dir); }
-    } else strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
-    g_mnt[g_nmnt].img = NULL;
+            strlcpy(g_mnt[target_idx].commit, dir, sizeof g_mnt[0].commit);
+            g_mnt[target_idx].txn_root = target_idx;
+            atomic_store(&g_mnt[target_idx].poison, 0);
+            atomic_store(&g_mnt[target_idx].first_write_ns, 0);
+            strlcpy(g_mnt[target_idx].dir, work, sizeof g_mnt[0].dir); }
+    } else strlcpy(g_mnt[target_idx].dir, dir, sizeof g_mnt[0].dir);
+    g_mnt[target_idx].img = NULL;
     struct stat ist;
     if (ro && !txn && !stat(dir, &ist) && S_ISREG(ist.st_mode)) {   // a RomFS image file in place of a folder
-        if (!(g_mnt[g_nmnt].img = img_open(dir))) die("the game files %s are not a complete RomFS image", dir);
+        if (!(g_mnt[target_idx].img = img_open(dir))) die("the game files %s are not a complete RomFS image", dir);
     }
-    g_nmnt++;
     pthread_mutex_unlock(&g_lock);
     if (txn_err) front_save_failed(txn_err);
     if (!ro && !txn) mkdir(dir, 0755);
-    LOG("fs mount %s: → %s%s%s", name, txn ? g_mnt[g_nmnt - 1].dir : dir, ro || txn_err ? " (read-only)" : txn ? " (transactional save: work directory, swapped in atomically on Commit)" : "", g_mnt[g_nmnt - 1].overlay[0] ? " (overlay first)" : "");
+    LOG("fs mount %s: → %s%s%s", name, txn ? g_mnt[target_idx].dir : dir, ro || txn_err ? " (read-only)" : txn ? " (transactional save: work directory, swapped in atomically on Commit)" : "", g_mnt[target_idx].overlay[0] ? " (overlay first)" : "");
     return RES_OK;
 }
 static Result mount(const char *name, const char *dir, int ro) { return mount_ex(name, dir, ro, 0); }
@@ -691,7 +704,26 @@ out:
 HLE_FORCE("_ZN2nn2fs6CommitEPKcRKNS0_12CommitOptionE", "fsp-srv; same as Commit (the option only clears the restore flag)", Result, h_fs_CommitOpt, const char *name, const void *opt) { (void)opt; return h_fs_Commit(name); }
 // SDK 11's old name: CommitSaveData(mount name) is the later Commit (Metroid Dread)
 HLE_FORCE("_ZN2nn2fs14CommitSaveDataEPKc", "fsp-srv; same as Commit (SDK 11's old name)", Result, h_fs_CommitSaveData, const char *name) { return h_fs_Commit(name); }
-HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; the mount table is permanent, unmounting is a no-op", void, h_fs_Unmount, const char *name) { (void)name; }
+HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; unmount a filesystem", void, h_fs_Unmount, const char *name) {
+    if (!name || !*name) return;
+    PATH_LOCK(); pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < g_nmnt; i++) {
+        if (!strcmp(g_mnt[i].name, name)) {
+            LOG("fs unmount %s: → %s", name, g_mnt[i].dir);
+            if (g_mnt[i].img) {
+                romfs_image_close(g_mnt[i].img);
+                g_mnt[i].img = NULL;
+            }
+            g_mnt[i].name[0] = 0;
+            g_mnt[i].dir[0] = 0;
+            g_mnt[i].overlay[0] = 0;
+            g_mnt[i].commit[0] = 0;
+            g_mnt[i].txn_root = -1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+}
 
 // ---------- Files ----------
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) {
