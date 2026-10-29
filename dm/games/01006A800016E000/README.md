@@ -55,6 +55,7 @@ No `pad_layout` key (the iPhone pad starts in the 3D layout).
 
 General host changes first needed here; each applies to every game:
 
+- **Elapsed time between two snapshots read as unknown** (the Spirit Board, reported by MacNativeGames): [Hooks whose return type did not match the SDK](../../../docs/reference/services.md#hooks-whose-return-type-did-not-match-the-sdk).
 - **The complete owned DLC list:** [Owned add-on content lists beyond 64 entries](../../../docs/reference/services.md#owned-add-on-content-lists-beyond-64-entries).
 - **NRO modules loaded at run time:** collected by the NRRs' SHA-256s (`nro_collect.py`, `nro.tsv`), rewritten (`patch_nso.py` reads NROs), mapped at start and activated by `nn::ro::LoadModule` / `UnloadModule` (`loader.c` "NRO modules", `hle_ro.c`; `DM_NRO=0` turns it off), embedded on iOS (`gen_embed.py`, `nro_pieces`): [Loading NROs with `ro::LoadModule`](../../../docs/reference/services.md#loading-nros-with-roloadmodule), [development.md, The packing script in detail](../../../docs/development.md#the-packing-script-in-detail).
 - **Register copies followed back to a jump table's base** (`copied_base`): [Far table base passed through other registers](../../../docs/reference/rewriter.md#far-table-base-passed-through-other-registers).
@@ -67,3 +68,4 @@ General host changes first needed here; each applies to every game:
 ## Open
 
 - The one geometry shader among the 35,012: whether it builds is not recorded.
+- The base game 1.0.0 (v0) packed alone (a derived profile) stops before the address region check: the NRO collection's `data.arc` reader (`dm/gfx/tools/smash_arc.py`) knows only 13.x's file system table, and 1.0.0's is not one zstd frame (`ZstdError: Unknown frame descriptor`); with the NROs skipped, the rewrite of its `main` (`fd471eb4…`) stops at a jump table it cannot resolve (`patch_nso.py`, `jump table f5c9cc`). Its engine region is not measured.

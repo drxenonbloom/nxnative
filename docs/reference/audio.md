@@ -112,6 +112,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Fix:** `capture` in `hle_audren.c` takes the layout whose walk finds the 0xcafebabe magic on every command of the first valid list; [incomplete startup lists](#incomplete-startup-lists-must-not-select-the-command-layout) leave detection open.
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) (SDK 6.5.0).
 
+### SDK 5: a startup list that walks in two layouts, and a 0x138-byte DeviceSink
+
+- **Symptom:** no sound: `[RED] audren: no DeviceSink (ID 0x13) in the command list, 0 commands of 0x148 bytes` and `[RED] audren: command 2 in the command list is malformed (offset 0x3e, …)`, with `first-frame commands 13, by command ID:  0×2`.
+- **Cause:** SDK 5.4.0's command list has SDK 6's header. Its first list holds two commands, the first of ID 0x14 and 0x14 bytes, so it walks in the SDK 8–20 layout as well (the ID read as the size), and that layout was taken because it is tried first. Its DeviceSink (`CommandBuffer::GenerateDeviceSinkCommand`, `sdk+0x233890`) is SDK 4's (ID 0xf, device name +0x14, upsample buffer +0x118, input count +0x120) but 0x138 bytes, with the input indices as s16 from +0x124.
+- **Fix:** `capture` in `hle_audren.c` takes a header layout only from a list that walks in exactly one; a list that walks in none or in several is a silent frame. The sink scan takes the one 0x130-byte (s8 indices) or 0x138-byte (s16 indices, `g_sink5`) command with 1 to 6 inputs. `t_audren_layout` covers SDK 5 and Bastion's first list.
+- **Found on:** [Bastion](../../dm/games/010038600B27E000/README.md) (1.0.0, SDK 5.4.0).
+
 ### Unaligned command headers during layout probing
 
 - **Symptom:** UBSan reports a misaligned `uint32_t` load in `cmd_ok` while `t_audren_layout` probes SDK 4/6 lists (issue #409).
@@ -166,6 +173,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Found on:** [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md) (Asian release 1.05 on the Mac).
 - **Check:** [PR #262](https://github.com/seedds/nxnative/pull/262) reports Unicorn Overlord at 240 frames: 0 underruns in 10,000 callbacks; 13 Sentinels stays at 0. A silent Core Audio probe on a Mac mini reproduced the disposal error and the stale buffer after a rate change, then verified the fixes: default output switched between USB at 48 kHz and speakers at 44.1 kHz with callbacks continuing, and the same speakers at 44.1 / 96 / 48 kHz used 221 / 480 / 240 frames. The original default output and device rates were restored. `make -C dm/host/tests GAME=<id> audio-device` checks setup, device and rate notifications, scope filtering, buffer limits, synchronous notifications, the diagnostic override, absent devices, close and failed-open listener cleanup without audio hardware.
 - **Open:** the listed HDMI output was not retained as the system default during the probe, so switching to it remains unvalidated. The probe verifies silent host playback; gameplay listening after these listener changes has not been repeated.
+
+### The ring / silent switch muted the game on iOS
+
+- **Symptom:** a game is silent on an iPhone whose ring / silent switch is set to silent, though the volume is up; a game or video app plays through the switch.
+- **Cause:** the audio session's category was `AVAudioSessionCategorySoloAmbient`, which iOS silences with the switch.
+- **Fix:** `front_ios_audio_session` in `front_ios.m` sets `AVAudioSessionCategoryPlayback`: the switch no longer mutes the game, and it still interrupts other apps' audio, as `SoloAmbient` did. The host still suspends its output when the app goes to the background (no background audio mode is declared).
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (iPhone: reported by the player); also [issue #155](https://github.com/seedds/nxnative/issues/155), whose commenter has to toggle the switch to hear any game.
+- **Check:** open question, not run on a device: with the switch on silent, the game's sound should play; the log's `audio session:` line shows the session came up.
 
 ### Interruptions that stop RemoteIO callbacks
 

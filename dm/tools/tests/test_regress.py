@@ -96,6 +96,56 @@ class Regress(unittest.TestCase):
         a = regress.normalize_red('[dm] [RED] shader 0a91af5bef8578e2: 12 bindings at 0x1f00 in /Volumes/NX/games/x [y]/b')
         b = regress.normalize_red('[dm] [RED] shader 1b91af5bef8578e3: 7 bindings at 0x2000 in /tmp/z')
         self.assertEqual(a, b)
+        # Scarlet: one red line, its register zero in one run ("x1=0") and not in the other ("x1=0x1")
+        a = regress.normalize_red('[dm] [RED] NVN unimplemented function called: nvnCommandBufferSetConservativeRasterDilate (x0=0x7f3c2a10 x1=0 x2=0x3)')
+        b = regress.normalize_red('[dm] [RED] NVN unimplemented function called: nvnCommandBufferSetConservativeRasterDilate (x0=0x7f3c2a10 x1=0x1 x2=0x3)')
+        self.assertEqual(a, b)
+        self.assertEqual(regress.red_kinds(a.replace('x#=#', 'x#=0x#')), [a])   # a kind stored in an older baseline
+
+    def test_red_missing_libraries(self):   # Tears of the Kingdom, 2026-10-28: ~2,000 shaders per run the chain build does not hold, other names each run
+        M = regress.MISSING_LIB
+        lib = '/Volumes/T7/nsp/The Legend of Zelda Tears of the Kingdom/0100F2C0115B6000-work/regress/chain/nvn-a78f966a7b38-922b2b7671c9-7fb6953e58a81bc8/b-a78f966a7b38'
+        fused = (f'[dm] [nvn-mtl] [RED] failed to load shader c41c950044f80287_b: cannot open {lib}/c41c950044f80287_b.metallib'
+                 f'[dm] [nvn-mtl] [RED] failed to load shader 3470b30952386168_b: cannot open {lib}/3470b30952386168_b.metallib')
+        self.assertEqual([regress.normalize_red(m) for m in regress.red_messages(fused)], [M, M])   # two threads' messages on one line (LOG before the stream lock)
+        self.assertEqual(regress.normalize_red('[dm] [nvn-mtl] [RED] failed to load shader 7ae4bdc2749fd127_b: no reflection json'), M)
+        self.assertEqual(regress.normalize_red('[dm] [nvn-mtl] [RED] shader 607bd409ec4ee6e4 (pixel) failed to load: build the shaders with dm/gfx/tools/dmsh_build.py first'), M)
+        # a library Metal could not load is not a missing one; a key with a suffix is still a key
+        self.assertEqual(regress.normalize_red('[dm] [nvn-mtl] [RED] failed to load shader 7ae4bdc2749fd127_b: Function main0 has a deserialization error'),
+                         'failed to load shader <key>_b: Function main# has a deserialization error')
+        self.assertEqual(regress.normalize_red(f'[dm] [nvn-mtl] [RED] pulling library of 1cbf4bb2a0d39e17_b not usable (no library: cannot open {lib}/x)'),
+                         regress.normalize_red(f'[dm] [nvn-mtl] [RED] pulling library of 9e0d17c3b4a5f601_b not usable (no library: cannot open {lib}/y)'))
+        text = '\n'.join([fused, '[dm] [nvn-mtl] [RED] failed to load shader 7ae4bdc2749fd127_b: no reflection json', '[dm] frame 3'])
+        self.assertEqual(regress.read_log(text)[0], {M: 3})
+        # kinds stored by the harness before (keys cut into "#" fragments, fused messages, cut at 200 characters) read as the one kind
+        old = {'failed to load shader #c#f#dce#a_b: cannot open <path> [nvn-mtl] [RED] failed to load shader f#a#cdfe#a#eb_b: cannot open <path>': 1,
+               'failed to load shader #d#c#cd#ad_b: cannot open <path> Legend of Zelda Tears of the Kingdom<path> [nvn-mtl] [RED] failed to load shader #e#a#ba#_b: no reflection json': 1,
+               'failed to load shader #e#d#e#fbd#_b: cannot open <path> Legend of Zelda Tears of the Kingdom<path> [nvn-mtl] [RED] failed to load shader #e#d#e#fbd#_b: cannot open <path> Legend of Zelda Tears of the ': 1,
+               'shader #bd#f#e#c (pixel) failed to load: build the shaders with dm<path> first': 7, 'NVN unimplemented function called: x (x#=#)': 2,
+               'pulling library of #f#c#dbf_b not usable (no library: cannot open <path> Legend of Zel': 1, 'compile of #a#e_b failed: x': 1}
+        for tail in ('failed to load shader f#d#d#e#a#c#_b: no refle', 'failed to', 'fail'):   # the cut-off last message of a 200-character kind
+            head, sep = 'failed to load shader #a#e_b: cannot open <path> Legend of Zelda Tears of the Kingdom<path>', ' [nvn-mtl] [RED] '
+            old[head + ' ' * (200 - len(head) - len(sep) - len(tail)) + sep + tail] = 1
+        self.assertEqual(regress.red_counts({'red': old}), {M: 20, 'NVN unimplemented function called: x (x#=#)': 2, 'compile of <key>_b failed: x': 1})
+        route = {'reach': None}
+        base = [{'exit': None, 'max_frame': 500, 'red': old}, {'exit': None, 'max_frame': 500, 'red': {M: 2303}}]
+        lv, known, d = regress.smoke_diff(base, [{'exit': None, 'max_frame': 500, 'red': {M: 1641, 'NVN unimplemented function called: x (x#=#)': 1, 'compile of <key>_b failed: x': 1}}], route)
+        self.assertFalse(lv['REGRESSION'] or lv['CHANGED'], lv)
+        lv, known, d = regress.smoke_diff(base, [{'exit': None, 'max_frame': 500, 'red': {M: 9000}}], route)   # only a jump far beyond the run-to-run spread is news
+        self.assertTrue(any('missing shader libraries' in x for x in lv['CHANGED']), lv)
+        lv, known, d = regress.smoke_diff([{'exit': None, 'max_frame': 500, 'red': {}}], [{'exit': None, 'max_frame': 500, 'red': {M: 3}}], route)
+        self.assertEqual(d['new_red'], [{'text': M, 'count': 3}])   # a game whose baseline holds every shader it asks for
+
+    def test_hang_evidence(self):   # a hung host is asked for its state dump and sampled before the watchdog stops it
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td); (cwd / 'ctl').write_text('shot x.png\n')
+            def fake(cmd, **kw):
+                self.assertEqual(cmd[:2], ['sample', '4242']); Path(cmd[cmd.index('-file') + 1]).write_text('Call graph:\n'); return NS(returncode=0)
+            with patch.object(regress.time, 'sleep'), patch.object(regress.subprocess, 'run', fake):
+                self.assertEqual(regress.hang_evidence(NS(pid=4242), cwd), 'hang_sample.txt')
+            self.assertEqual((cwd / 'ctl').read_text(), 'shot x.png\ndump\n')
+            with patch.object(regress.time, 'sleep'), patch.object(regress.subprocess, 'run', side_effect=OSError):
+                self.assertIsNone(regress.hang_evidence(NS(pid=4242), cwd))
 
     def test_routes(self):   # every profile's smoke.tsv reads
         for f in (REPO / 'dm/games').glob('*/smoke.tsv'):
@@ -140,8 +190,57 @@ class Regress(unittest.TestCase):
         self.assertEqual(d['new_red'], [{'text': 'b #', 'count': 3}])
         lv, known, d = regress.smoke_diff(bad, bad, route)   # a failure the baseline has too is known, not new
         self.assertFalse(lv['NEW-FAIL']); self.assertTrue(known)
+        slow = [dict(base[0], reached=False, max_frame=90)]   # the reach missed in both, each run with its own max frame: known, not new
+        lv, known, d = regress.smoke_diff(slow, [dict(slow[0], max_frame=95)], route)
+        self.assertFalse(lv['NEW-FAIL'], lv); self.assertEqual(known, ['frame 100 not reached by 30 s (max 95)'])
+        self.assertTrue(regress.smoke_diff(base, slow, route)[0]['NEW-FAIL'])   # missed only in the candidate: new
+        segv, abrt = [dict(base[0], exit=-11, crash={'signal': 'SIGSEGV'})], [dict(base[0], exit=-6, crash={'signal': 'SIGABRT'})]
+        self.assertTrue(regress.smoke_diff(segv, abrt, route)[0]['NEW-FAIL'])   # a crash with another signal is new
+        q1, q139 = [dict(base[0], exit=1)], [dict(base[0], exit=139)]
+        self.assertTrue(regress.smoke_diff(q1, q139, route)[0]['NEW-FAIL'])   # so is an exit with another status
+        self.assertFalse(regress.smoke_diff(q1, [dict(base[0], exit=1)], route)[0]['NEW-FAIL'])
         quit0 = [dict(base[0], exit=0)]   # the game ended by itself before the route did: a failure even with exit status 0
         self.assertTrue(any('exited before the end' in x for x in regress.smoke_diff(base, quit0, route)[0]['NEW-FAIL']))
+
+    def test_route_capture_frame(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / 'smoke.tsv'
+            f.write_text('save\tnew\nsecs\t40\n')
+            self.assertIsNone(regress.read_route(f)['capture'])
+            f.write_text('save\tnew\nsecs\t40\ncapture\t3000\n')
+            self.assertEqual(regress.read_route(f)['capture'], 3000)
+
+    def test_parse_replays(self):
+        live, other = 'a' * 64, 'b' * 64
+        text = (f'replay 1: digest {live} == live {live} (1920x1080 format 70); submit CPU 1 ms\nMATCH: the replayed frame equals the live frame\n'
+                f'replay 2: 97 pixels differ from the live frame (largest byte difference 46, x 1648-1676 y 739-746)\n'
+                f'replay 2: digest {other} != live {live} (1920x1080 format 70); submit CPU 1 ms\n'
+                f'replay 3: digest {other} != live {live} (1920x1080 format 70)\n2 of 3 fresh replays match the live frame (within 100 pixels)\n')
+        r = regress.parse_replays(text)
+        self.assertEqual([x['index'] for x in r], [1, 2, 3])
+        self.assertEqual((r[0]['same'], r[0]['pixels']), (True, 0))
+        self.assertEqual((r[1]['same'], r[1]['pixels'], r[1]['largest'], r[1]['box']), (False, 97, 46, [1648, 1676, 739, 746]))
+        self.assertIsNone(r[2]['pixels'])   # a capture without the live pixels: compared by digest only
+
+    def test_replay_grade(self):
+        live = 'a' * 64
+        def res(*px, exit=None, red=()):
+            xs = [{'digest': live if p == 0 else f'{p:064x}', 'same': p == 0, 'live': live, 'pixels': p, 'largest': 9 if p else 0, 'box': [0, 1, 0, 1] if p else None} for p in px]
+            return {'exit': exit if exit is not None else 0 if all(p <= 120 for p in px) else 1, 'replays': xs, 'red': list(red)}
+        lv, known = regress.replay_grade(res(0, 0, 0), res(0, 0, 0), 0)
+        self.assertFalse(any(lv.values()), lv)
+        lv, known = regress.replay_grade(res(0, 97), res(124, 157), 124)   # a noisy capture: other frames within the tolerance (twice the noise) are no change
+        self.assertFalse(any(lv.values()), lv)
+        lv, known = regress.replay_grade(res(0, 0), res(0, 3), 0)   # an exact one: any other frame is a regression
+        self.assertTrue(lv['REGRESSION'], lv)
+        lv, known = regress.replay_grade(res(0, 97), res(0, 500), 124)
+        self.assertTrue(lv['REGRESSION'], lv)
+        lv, known = regress.replay_grade(res(500), res(600), 124)   # beyond the tolerance in both: known, the difference shown
+        self.assertFalse(lv['REGRESSION']); self.assertTrue(known and lv['CHANGED'])
+        lv, known = regress.replay_grade(res(0), res(exit=2, red=['[RED] nvn_replay: program #3 ...']), 0)
+        self.assertTrue(any('capture' in x for x in lv['ERROR']), lv)
+        lv, known = regress.replay_grade(res(0), res(exit=-11), 0)
+        self.assertTrue(lv['NEW-FAIL'], lv)
 
     def test_status_order(self):
         self.assertEqual(regress.worst('PASS', 'CHANGED', 'REGRESSION'), 'REGRESSION'); self.assertEqual(regress.worst('NEW-FAIL', 'ERROR'), 'ERROR')
@@ -313,6 +412,25 @@ class Regress(unittest.TestCase):
             g = regress.Game(root, build)
             self.assertEqual(g.shader_roots(), [romfs, capture])
 
+    def test_rewriter_uses_original_registered_profile_and_keeps_provisional(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for derived in (False, True):
+                with self.subTest(derived=derived):
+                    env = {'DM_GAME': 'game', 'DM_GAMES_DIR': '/copied/profile', 'DM_GAMES_FIRST': '1'}
+                    g = NS(id='game', folder=root / str(derived), build=root / 'build', ver='v0',
+                           patched=root / 'patched_v0', derived=derived, env=lambda tree, config=env: dict(config))
+                    tree = NS(id='tree', path=root, py=lambda code, e: 'main')
+                    process = NS(poll=lambda: 0, returncode=0)
+                    with patch.object(regress, 'rewriter_key', return_value='key'), patch.object(regress, 'say'), \
+                         patch.object(regress.subprocess, 'Popen', return_value=process) as spawn, patch.object(regress.time, 'sleep'):
+                        dst, _ = regress.modules_for(tree, g, True, 1)
+                    selected = spawn.call_args.kwargs['env']
+                    self.assertEqual(selected.get('DM_GAMES_DIR'), env['DM_GAMES_DIR'] if derived else None)
+                    self.assertEqual(selected.get('DM_GAMES_FIRST'), '1' if derived else None)
+                    self.assertEqual(selected['DM_GAME'], 'game')
+                    self.assertTrue((dst / '.done').is_file())
+
     def test_vk_build_records_failure_even_without_generated_shaders(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); tool = root / 'dm/gfx/tools/vk_shaders.py'; tool.parent.mkdir(parents=True)
@@ -339,6 +457,148 @@ class Regress(unittest.TestCase):
             stack.enter_context(patch.object(regress, 'say'))
             regress.cmd_check(a)
             self.assertEqual(finish.call_args.args[0]['games']['game']['status'], 'NEW-FAIL')
+
+
+class Validated(unittest.TestCase):
+    """--record: dm/games/<id>/validated.tsv, the chain a game was last green on"""
+    def run_record(self, td, status, record=True, dirty=False, mode='quick', smoke=True, chain='aaaa11112222', runs=None, command='check', derived=False):
+        games = Path(td) / 'dm/games'; (games / 'g1').mkdir(parents=True, exist_ok=True)
+        head = Path(td) / 'dm/gfx/nvn'; head.mkdir(parents=True, exist_ok=True)
+        (head / 'dmsh_chain.h').write_text(f'#define DMSH_CHAIN "{chain}"\n')
+        route = {'reach': (120, 5), 'shots': [4]}
+        green = {'exit': None, 'max_frame': 180, 'reached': True, 'secs': 6, 'shots': {'4': {'dhash': '0123456789abcdef', 'rgb16': '00' * 768}}}
+        label = 'candidate' if command == 'check' else 'baseline'
+        gr = {'status': status, **({'smoke': {'route': route, label: [green] if runs is None else runs}} if smoke else {})}
+        rep = {'command': command, 'mode': mode, 'machine': {'model': 'Mac14,6', 'macos': '26.1'}, 'games': {'g1': gr}}
+        tree = NS(commit='0123456789abcdef', dirty=dirty, path=Path(td))
+        with patch.object(regress, 'REPO', Path(td)), patch.object(regress, 'say'):
+            regress.record_validated(NS(record=record), rep, tree, [NS(id='g1', derived=derived)])
+        return games / 'g1/validated.tsv'
+
+    def test_green_writes_the_file(self):
+        for status in ('PASS', 'CHANGED'):
+            with self.subTest(status), tempfile.TemporaryDirectory() as td:
+                f = self.run_record(td, status)
+                self.assertTrue(f.read_text().startswith('# '))
+                row = regress.read_validated(f)['quick']
+                self.assertEqual((row['chain'], row['commit'], row['machine'], row['macos']), ('aaaa11112222', '0123456789', 'Mac14,6', '26.1'))
+                self.assertRegex(row['date'], r'^\d{4}-\d\d-\d\d$')
+
+    def test_modes_keep_one_row_each(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.run_record(td, 'PASS', mode='quick', chain='aaaa11112222')
+            f = self.run_record(td, 'PASS', mode='full', chain='bbbb33334444')
+            self.run_record(td, 'PASS', mode='quick', chain='cccc55556666')
+            rows = regress.read_validated(f)
+            self.assertEqual((rows['quick']['chain'], rows['full']['chain']), ('cccc55556666', 'bbbb33334444'))
+            self.assertEqual(sum(1 for x in f.read_text().splitlines() if not x.startswith('#')), 2)
+
+    def test_red_leaves_the_record(self):
+        for status in ('NEW-FAIL', 'REGRESSION', 'ERROR'):
+            with self.subTest(status), tempfile.TemporaryDirectory() as td:
+                f = self.run_record(td, 'PASS'); before = f.read_text()
+                self.run_record(td, status, chain='bbbb33334444')
+                self.assertEqual(f.read_text(), before)
+
+    def test_without_record_no_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertFalse(self.run_record(td, 'PASS', record=False).exists())
+
+    def test_no_boot_run_no_file(self):   # a chain-only result says nothing about the game's boot
+        with tempfile.TemporaryDirectory() as td:
+            self.assertFalse(self.run_record(td, 'PASS', smoke=False).exists())
+            self.assertFalse(self.run_record(td, 'PASS', mode='static').exists())
+
+    def test_known_boot_failure_keeps_last_green(self):
+        route = {'reach': (120, 5), 'shots': [4]}
+        green = {'exit': None, 'max_frame': 180, 'reached': True, 'secs': 6, 'shots': {'4': {'dhash': '0123456789abcdef', 'rgb16': '00' * 768}}}
+        for failure in ({'crash': {'signal': 'SIGSEGV'}}, {'exit': 1}, {'hang_at_s': 3}, {'max_frame': -1},
+                        {'reached': False}, {'prebuild': {'exit': 1}}, {'shots': {}}):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as td:
+                failed = green | failure
+                levels, known, _ = regress.smoke_diff([failed], [failed], route)
+                self.assertFalse(any(levels.values()))   # unchanged broken boots are PASS in a regression check
+                self.assertTrue(known)
+                f = self.run_record(td, 'PASS'); before = f.read_text()
+                self.run_record(td, 'PASS', chain='bbbb33334444', runs=[failed])
+                self.assertEqual(f.read_text(), before)
+
+    def test_empty_or_partially_failed_runs_do_not_record(self):
+        for runs in ([], [{'max_frame': 1}, {'max_frame': -1}]):
+            with self.subTest(runs=runs), tempfile.TemporaryDirectory() as td:
+                self.assertFalse(self.run_record(td, 'PASS', runs=runs).exists())
+
+    def test_baseline_success_can_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertTrue(self.run_record(td, 'PASS', command='baseline').is_file())
+
+    def test_derived_profile_does_not_validate_repository_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = self.run_record(td, 'PASS'); before = f.read_text()
+            self.run_record(td, 'PASS', chain='bbbb33334444', derived=True)
+            self.assertEqual(f.read_text(), before)
+
+    def test_record_error_keeps_completed_report(self):
+        with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
+            root = Path(td)
+            self.run_record(td, 'PASS')
+            tree = NS(id='tree', path=root, commit='0123456789abcdef', dirty=False,
+                      describe=lambda: {'rev': 'test', 'sha': '0123456789abcdef'})
+            route = {'reach': None, 'shots': []}
+            game = NS(id='g1', name='game', folder=root / 'nsp', derived=False, route=lambda: route)
+            manifest = {'key': 'key', 'kind': 'nvn', 'failed': 0, 'total': 1, 'ok': 1}
+            a = NS(rev='test', no_smoke=False, quick=True, rewrite=False, runs=1, record=True, out=str(root / 'report'))
+            stack.enter_context(patch.object(regress, 'REPO', root))
+            stack.enter_context(patch.object(regress, 'Tree', return_value=tree))
+            stack.enter_context(patch.object(regress, 'select', return_value=[game]))
+            stack.enter_context(patch.object(regress, 'artifacts', return_value={'manifest': manifest}))
+            stack.enter_context(patch.object(regress, 'smoke_series', return_value=[{'exit': None, 'max_frame': 180}]))
+            stack.enter_context(patch.object(regress, 'smoke_context', return_value={}))
+            stack.enter_context(patch.object(regress, 'machine', return_value={'model': 'test', 'chip': 'test', 'macos': 'test', 'xcode': 'test'}))
+            stack.enter_context(patch.object(regress, 'say'))
+            write_text = Path.write_text
+            def fail_record(path, text, *args, **kwargs):
+                if path.name == 'validated.tsv': raise PermissionError('read-only profile')
+                return write_text(path, text, *args, **kwargs)
+            stack.enter_context(patch.object(Path, 'write_text', fail_record))
+            with self.assertRaisesRegex(regress.HarnessError, 'regression report was saved'):
+                regress.cmd_baseline(a)
+            self.assertEqual(json.loads((root / 'report/report.json').read_text())['status'], 'PASS')
+            self.assertIn('game `g1`: PASS', (root / 'report/report.md').read_text())
+
+    def test_validation_metadata_does_not_change_profile_inputs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            prof = root / 'dm/games/g1'; prof.mkdir(parents=True)
+            (prof / 'game.tsv').write_text('name\tgame\n')
+            g = NS(id='g1', folder=root / 'nsp', derived=False)
+            first = regress.Game.profile_dir(g, NS(path=root))
+            (prof / 'validated.tsv').write_text('quick\tchain=old\n')
+            self.assertEqual(regress.Game.profile_dir(g, NS(path=root)), first)
+            self.assertFalse((first / 'validated.tsv').exists())
+
+    def test_dirty_tree(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(regress.read_validated(self.run_record(td, 'PASS', dirty=True))['quick']['commit'], '0123456789+dirty')
+
+    def test_list_shows_current_and_old(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.run_record(td, 'PASS', chain='aaaa11112222')
+            with patch.object(regress, 'REPO', Path(td)):
+                self.assertIn('quick chain aaaa11112222 (current)', regress.validated_text('g1'))
+                self.assertEqual(regress.validated_text('nobody'), 'never recorded')
+                (Path(td) / 'dm/gfx/nvn/dmsh_chain.h').write_text('#define DMSH_CHAIN "dddd77778888"\n')
+                self.assertIn('(old, now dddd77778888)', regress.validated_text('g1'))
+                g = NS(id='g1', name='n', kind='nvn', ver='1', folder=Path(td), route=lambda: None)
+                with patch.object(regress, 'find_games', return_value=[g]), patch.object(regress, 'say') as say:
+                    regress.cmd_list(NS())
+                self.assertIn('green: quick chain aaaa11112222 (old', say.call_args.args[0])
+
+    def test_profiles_validated_files_read(self):
+        for f in (REPO / 'dm/games').glob('*/validated.tsv'):
+            for mode, row in regress.read_validated(f).items():
+                self.assertIn(mode, ('quick', 'full'), f)
+                self.assertTrue(row.get('chain') and row.get('commit') and row.get('date'), f)
 
 
 if __name__ == '__main__':
