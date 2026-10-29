@@ -223,6 +223,7 @@ class AppBundle(Base):
                 out_app=out_app,
                 mode='standalone'
             )
+        self.assertEqual(app, out_app.resolve())
         res = out_app / 'Contents/Resources'
         self.assertFalse((res / 'romfs').is_symlink())
         self.assertTrue((res / 'romfs/game.data').is_file())

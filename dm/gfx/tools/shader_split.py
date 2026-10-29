@@ -1091,7 +1091,7 @@ def _drp_inflate5(src, unc_sz):
                 for _ in range(l): r = (r << 1) | (c & 1); c >>= 1
                 tbl[(l, r)] = sym
         return tbl
-    def decode(tbl):
+    def decode(tbl) -> int:
         nonlocal pos, bitbuf, bitcnt
         code = 0
         for l in range(1, 16):
@@ -1100,6 +1100,7 @@ def _drp_inflate5(src, unc_sz):
             s = tbl.get((l, code))
             if s is not None: return s
         red('DRP mode 5: invalid Huffman code')
+        raise ValueError('DRP mode 5: invalid Huffman code')
     fixed_lit = huff_build([8] * 144 + [9] * 112 + [7] * 24 + [8] * 8)
     fixed_dist = huff_build([5] * 32)
     while True:
