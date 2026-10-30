@@ -113,6 +113,12 @@ class MonolithTests(unittest.TestCase):
         packed = zlib.compress(b'test')
         with self.assertRaisesRegex(SystemExit, 'stored/raw sizes'):
             split.monolith_cmp_data(struct.pack('<8s2I', b'cmp\0zlib', len(packed), 5) + packed, 0)
+        with self.assertRaisesRegex(SystemExit, 'stored/raw sizes'):
+            split.monolith_cmp_data(struct.pack('<8s2I', b'cmp\0zlib', 10, 10) + b'not zlib!!', 0)
+
+    def test_xbc_checks_corrupted_payload(self):
+        with self.assertRaisesRegex(SystemExit, 'stored/raw sizes'):
+            split.xbc_data(struct.pack('<4s3I', b'xbc1', 1, 10, 10) + bytes(32) + b'not zlib!!', 0)
 
     def test_source_only_hcps_has_no_nvn_binaries(self):
         data = bytearray(program(['vs', 'ps'])[0])

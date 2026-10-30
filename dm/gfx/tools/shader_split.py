@@ -1925,8 +1925,10 @@ def xbc_data(d, off):
     kind, raw, size = struct.unpack_from('<3I', d, off + 4)
     if kind not in (0, 1, 3) or not size or off + 48 + size > len(d): return None
     data = d[off + 48:off + 48 + size]
-    if kind == 1: data = zlib.decompress(data)
-    elif kind == 3: data = zstd_mod().decompress(data)
+    try:
+        if kind == 1: data = zlib.decompress(data)
+        elif kind == 3: data = zstd_mod().decompress(data)
+    except Exception: red(f'XBC1 @{off:#x}: payload does not match stored/raw sizes')
     if len(data) != raw: red(f'XBC1 @{off:#x}: expected {raw} bytes, decoded {len(data)}')
     return data, off + 48 + size
 
@@ -1937,7 +1939,9 @@ def monolith_cmp_data(d, off):
     if off + 16 > len(d) or d[off:off + 8] != b'cmp\0zlib': return None
     size, raw = struct.unpack_from('<2I', d, off + 8)
     if not size or size > len(d) - off - 16: return None
-    z = zlib.decompressobj(); data = z.decompress(d[off + 16:off + 16 + size]) + z.flush()
+    z = zlib.decompressobj()
+    try: data = z.decompress(d[off + 16:off + 16 + size]) + z.flush()
+    except zlib.error: red(f'cmp zlib @{off:#x}: payload does not match stored/raw sizes')
     if not z.eof or z.unused_data or len(data) != raw: red(f'cmp zlib @{off:#x}: payload does not match stored/raw sizes')
     return data, off + 16 + size
 
